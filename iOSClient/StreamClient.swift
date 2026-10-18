@@ -794,6 +794,9 @@ final class StreamClient: ObservableObject {
     @Published var clipboardNote: ClipboardNote?
     /// This connection sent its subscription and no stop since (ClipboardPolicy.deviceSubscription).
     var clipboardSubscribed = false
+    /// Invalidates asynchronous Paste work when a session or the sharing setting changes.
+    var clipboardPasteGeneration = 0
+    @Published var clipboardPreparing = false
     /// When Sill last became active: a session that starts soon after gets the chip's look too.
     var clipboardActivatedAt: TimeInterval?
     /// What this device sent last, and its clipboard's change count right after: the Mac's echo of it

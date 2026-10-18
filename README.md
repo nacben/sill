@@ -76,8 +76,8 @@ Sill has layouts of its own.
   you set its text size with Aa, or turn on the virtual display; then your Mac
   makes it fill the taller picture.
 - **The clipboard** goes both ways while Share Clipboard is on, in both apps:
-  text you copy on your Mac is ready to paste on your device, and Paste in
-  Sill sends what you copied on your device to your Mac's clipboard, where you
+  text or images you copy on your Mac are ready to paste on your device, and
+  Paste in Sill sends your device's copy to your Mac's clipboard, where you
   press ⌘V. Sill never reads your device's clipboard by itself, and copies a
   password manager marks as concealed stay on your Mac.
 - **On iPhone Duo**, Sill follows the hinge: open it flat and your Mac fills
@@ -122,8 +122,10 @@ Sill has layouts of its own.
   from the website and not from the Mac App Store.
 
 Good to know: Sill shows one window, or the whole desktop, at a time, and it
-does not play sound from your Mac. The clipboard carries text only, up to 256
-KB at a time, and only between apps that both have it. Your Mac needs to be
+does not play sound from your Mac. The clipboard carries text up to 256
+KB at a time, plus images when both apps support them. Images are normalized
+to PNG or JPEG, resized to at most 2048 pixels on the long side and 700 KB;
+metadata is removed. Older app versions continue sharing text only. Your Mac needs to be
 awake, with Sill open. Sill may not be able to wake it. After a restart Sill
 opens only once someone logs in, with Launch at Login on. Only the iPhones and
 iPads you paired can connect, unless you turn off Require pairing in Settings

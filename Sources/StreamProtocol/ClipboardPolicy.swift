@@ -3,12 +3,13 @@ import Foundation
 /// The clipboard's rules, both ends (kind 32, docs/clipboard-plan.md): what a device's message asks
 /// of the host, which change of the Mac's pasteboard the host sends and to whom, when a device
 /// subscribes and stops, which text from the Mac a device writes, when the device offers its own
-/// clipboard to the Mac (the chip), and every word. Pure (Foundation only): the host (HostClipboard)
-/// and the device (StreamClient+Clipboard) do only what reads and writes a pasteboard, and
-/// Tests/checks/clipboard checks this file with StreamProtocol's sources.
+/// clipboard to the Mac (the chip), and every word. HostClipboard and StreamClient+Clipboard
+/// read and write the pasteboards. Tests/checks/clipboard and clipboard-images check these rules.
 public enum ClipboardPolicy {
     /// `WindowList.clipboard` from a host that takes and sends text.
     public static let generation = 1
+    public static let imageGeneration = 2
+    public static let currentGeneration = imageGeneration
     /// The most a kind 32's JSON may be, either way (Clipboard.maxTextBytes says why).
     public static let maxPayload = StreamMessage.maxClientPayload
     /// A device's subscriptions and texts a second, per connection: a tap sends one. More is a runaway
@@ -33,15 +34,29 @@ public enum ClipboardPolicy {
 
     /// A kind 32 that sets the other side's clipboard to `text`: its JSON, or nil when the text is
     /// empty, longer than `Clipboard.maxTextBytes`, or its JSON longer than `maxPayload`.
-    public static func payload(text: String) -> Data? {
+    public static func payload(text: String, accepts: Int? = nil) -> Data? {
         guard !text.isEmpty, text.utf8.count <= Clipboard.maxTextBytes else { return nil }
-        let data = Wire.encode(Clipboard(text: text))
+        let data = Wire.encode(Clipboard(text: text, accepts: accepts))
         guard !data.isEmpty, data.count <= maxPayload else { return nil }
         return data
     }
 
     /// A device's subscription: `{}`.
     public static var subscription: Data { Wire.encode(Clipboard()) }
+    public static func hostTakesImages(_ value: Int?) -> Bool { (value ?? 0) >= imageGeneration }
+    public static func acceptsImages(_ payload: Data) -> Bool {
+        guard let clip = Wire.decode(Clipboard.self, from: payload) else { return false }
+        return (clip.accepts ?? 1) >= imageGeneration
+    }
+    public static func subscription(hostClipboard: Int?) -> Data {
+        hostTakesImages(hostClipboard) ? Wire.encode(Clipboard(accepts: imageGeneration)) : subscription
+    }
+    public static func payload(image: Data, accepts: Int? = nil) -> Data? {
+        guard ClipboardImage.type(of: image) != nil else { return nil }
+        let data = Wire.encode(Clipboard(image: image, accepts: accepts))
+        return data.count <= maxPayload ? data : nil
+    }
+
     /// A device's switch going off: `{"stop":true}`.
     public static var stopping: Data { Wire.encode(Clipboard(stop: true)) }
 
@@ -71,7 +86,7 @@ public enum ClipboardPolicy {
         case remote
         /// What this host wrote itself from a device's text.
         case own
-        /// No text (an image, a file without a name as text).
+        /// No supported content, or an image that could not be converted.
         case noText
         /// Empty text.
         case empty
@@ -82,6 +97,8 @@ public enum ClipboardPolicy {
     public enum HostDecision: Equatable, Sendable {
         /// To every subscriber, this kind 32.
         case send(Data)
+        /// An image is sent only to image-capable subscribers.
+        case sendImage(Data)
         case skip(HostSkip)
     }
 
@@ -101,11 +118,17 @@ public enum ClipboardPolicy {
     /// password manager's data nor another device's is ever read; only then the text (`text`), and the
     /// marker's value (`ownMarker`) only when its type is there.
     public static func hostDecides(types: [String], changeCount: Int, ownChangeCount: Int?, launchID: String,
-                                   ownMarker: () -> String?, text: () -> String?) -> HostDecision {
+                                   ownMarker: () -> String?, text: () -> String?, image: () -> Data? = { nil }) -> HostDecision {
         if let own = ownChangeCount, own == changeCount { return .skip(.own) }
         if types.contains(where: { markerTypes.contains($0) }) { return .skip(.marked) }
         if types.contains(remoteClipboardType) { return .skip(.remote) }
         if types.contains(ownType), ownMarker() == launchID { return .skip(.own) }
+        if let image = image() {
+            guard let data = payload(image: image) else { return .skip(.tooLong) }
+            return .sendImage(data)
+        }
+        // A failed image conversion must not send a file name or caption instead.
+        if types.contains(where: { ClipboardImage.sourceTypes.contains($0) }) { return .skip(.noText) }
         guard let text = text() else { return .skip(.noText) }
         guard !text.isEmpty else { return .skip(.empty) }
         guard let data = payload(text: text) else { return .skip(.tooLong) }
@@ -127,17 +150,23 @@ public enum ClipboardPolicy {
         case subscribe
         /// The same, and this text becomes the Mac's clipboard (and goes to every other subscriber).
         case set(String)
+        case setImage(Data)
         /// Send this connection nothing more.
         case stop
         /// Nothing: not subscribed, nothing set.
         case refuse(Refusal)
     }
 
-    /// `stop` wins over anything with it; text that is not empty sets; anything else (`{}`, empty
-    /// text, an image alone, which this generation does not take) subscribes.
+    /// `stop` wins; a valid image takes precedence over text. Empty content subscribes.
     public static func fromDevice(_ payload: Data) -> FromDevice {
+        guard payload.count <= maxPayload else { return .refuse(.tooLong) }
         guard let clip = Wire.decode(Clipboard.self, from: payload) else { return .refuse(.undecodable) }
         if clip.stop == true { return .stop }
+        if let image = clip.image {
+            guard image.count <= ClipboardImage.maxBytes else { return .refuse(.tooLong) }
+            guard ClipboardImage.type(of: image) != nil else { return .refuse(.undecodable) }
+            return .setImage(image)
+        }
         guard let text = clip.text, !text.isEmpty else { return .subscribe }
         guard text.utf8.count <= Clipboard.maxTextBytes else { return .refuse(.tooLong) }
         return .set(text)
@@ -167,7 +196,7 @@ public enum ClipboardPolicy {
     /// does nothing.
     static func countsAgainstRate(_ ask: FromDevice) -> Bool {
         switch ask {
-        case .subscribe, .set: return true
+        case .subscribe, .set, .setImage: return true
         case .stop, .refuse: return false
         }
     }
@@ -273,8 +302,10 @@ public enum ClipboardPolicy {
     /// What this device sent last, and its clipboard's change count right after.
     public struct Sent: Equatable, Sendable {
         public var text: String
+        public var image: Data?
         public var changeCount: Int
-        public init(text: String, changeCount: Int) { self.text = text; self.changeCount = changeCount }
+        public init(text: String, changeCount: Int) { self.text = text; self.image = nil; self.changeCount = changeCount }
+        public init(image: Data, changeCount: Int) { self.text = ""; self.image = image; self.changeCount = changeCount }
     }
 
     /// A kind 32 from the Mac: the text the device writes to its clipboard, or nil. Only with the
@@ -289,14 +320,22 @@ public enum ClipboardPolicy {
         return text
     }
 
+    public static func deviceImage(_ payload: Data, switchOn: Bool, hostClipboard: Int?, lastSent: Sent?, changeCount: Int) -> Data? {
+        guard switchOn, hostTakesImages(hostClipboard), payload.count <= maxPayload,
+              let clip = Wire.decode(Clipboard.self, from: payload), clip.stop != true,
+              let image = clip.image, ClipboardImage.type(of: image) != nil else { return nil }
+        if lastSent?.image == image, lastSent?.changeCount == changeCount { return nil }
+        return image
+    }
+
     /// The chip, "Paste on ‹Mac›": while connected to a Mac that takes the clipboard with the switch
     /// on, when the device's clipboard has text (`hasStrings`, which never asks to paste) and its
     /// change count is not the one Sill last handled (`handled`: sent, written from the Mac, or the
     /// chip dismissed or timed out for it). Asked when Sill becomes active, and at a session's start
     /// soon after (`looksAtSessionStart`).
-    public static func offersChip(connected: Bool, hostClipboard: Int?, switchOn: Bool, hasStrings: Bool,
+    public static func offersChip(connected: Bool, hostClipboard: Int?, switchOn: Bool, hasStrings: Bool, hasImages: Bool = false,
                                   changeCount: Int, handled: Int?) -> Bool {
-        connected && hostTakes(hostClipboard) && switchOn && hasStrings && changeCount != handled
+        connected && hostTakes(hostClipboard) && switchOn && (hasStrings || (hostTakesImages(hostClipboard) && hasImages)) && changeCount != handled
     }
 
     /// Whether the chip's `chipLifetime` runs now: only while the chip is on screen (nothing open over
@@ -327,7 +366,7 @@ public enum ClipboardPolicy {
     /// goes, as kind 32, to a connected Mac that takes the clipboard while the switch is on.
     public static func deviceSends(_ strings: [String], connected: Bool, hostClipboard: Int?, switchOn: Bool) -> DeviceSend {
         guard connected, hostTakes(hostClipboard), switchOn, let text = strings.first(where: { !$0.isEmpty }) else { return .nothing }
-        guard let data = payload(text: text) else { return .tooLong }
+        guard let data = payload(text: text, accepts: hostTakesImages(hostClipboard) ? imageGeneration : nil) else { return .tooLong }
         return .send(data)
     }
 
@@ -362,15 +401,17 @@ public enum ClipboardPolicy {
         public static func chipTitle(mac: String) -> String { "Paste on \(mac)" }
         public static let chipSubtitle = "Then press ⌘V there."
         /// The chip's words for VoiceOver, one element; its Paste button and Dismiss are their own.
-        public static func chipSpoken(mac: String, device: String) -> String {
-            "Paste on \(mac). Sends the text you copied on this \(device) to \(mac)’s clipboard. Then press Command-V there."
+        public static func chipSpoken(mac: String, device: String, images: Bool = false) -> String {
+            if images { return "Paste on \(mac). Sends the text or image you copied on this \(device) to \(mac)’s clipboard. Then press Command-V there." }
+            return "Paste on \(mac). Sends the text you copied on this \(device) to \(mac)’s clipboard. Then press Command-V there."
         }
         public static let dismiss = "Dismiss"
         /// Told to VoiceOver when the chip first shows for a copy (found in review: it came unannounced).
         public static func chipAnnouncement(mac: String) -> String { "Paste on \(mac) is available, near the bar." }
         /// The Paste button's hint, on the chip and in Settings.
-        public static func pasteHint(mac: String, device: String) -> String {
-            "Sends the text you copied on this \(device) to \(mac)’s clipboard."
+        public static func pasteHint(mac: String, device: String, images: Bool = false) -> String {
+            if images { return "Sends the text or image you copied on this \(device) to \(mac)’s clipboard." }
+            return "Sends the text you copied on this \(device) to \(mac)’s clipboard."
         }
         public static func sent(mac: String) -> String { "Sent to \(mac)’s clipboard. Press ⌘V there." }
         public static func sentSpoken(mac: String) -> String { "Sent to \(mac)’s clipboard. Press Command-V there." }
@@ -382,15 +423,16 @@ public enum ClipboardPolicy {
         // The Settings panel's This iPad group.
         public static let switchTitle = "Share Clipboard"
         public static func rowTitle(mac: String) -> String { "Paste on \(mac)" }
-        public static func footnote(on: Bool, mac: String, device: String) -> String {
-            on ? "Text you copy on \(mac) is ready to paste on this \(device). To paste on \(mac), copy text here, tap Paste, then press ⌘V there."
+        public static func footnote(on: Bool, mac: String, device: String, images: Bool = false) -> String {
+            if on && images { return "Text and images you copy on \(mac) are ready to paste on this \(device). To paste on \(mac), copy here, tap Paste, then press ⌘V there. Large images are resized; transparency is preserved." }
+            return on ? "Text you copy on \(mac) is ready to paste on this \(device). To paste on \(mac), copy text here, tap Paste, then press ⌘V there."
                : "Nothing you copy goes between this \(device) and \(mac) while this is off."
         }
 
         // Sill for Mac's Settings › General, under Share clipboard with devices.
         /// Its footnote (found in review: it said a password manager's copies stay, where only those it
         /// marks as concealed do, and "theirs here" read as if a device's copies came by themselves).
-        public static let macFootnote = "Text you copy here can be pasted on a connected iPhone or iPad, and text sent from one with Paste becomes this Mac’s. Copies a password manager marks as concealed stay on this Mac."
+        public static let macFootnote = "Text and images you copy here can be pasted on a connected iPhone or iPad, and copies sent from one with Paste become this Mac’s. Images need an updated Sill on both devices. Copies a password manager marks as concealed stay on this Mac."
         /// Under it while macOS does not allow every read (MacAccess): why what is copied here stays.
         public static func macAccessWarning(_ access: MacAccess) -> String? {
             switch access {

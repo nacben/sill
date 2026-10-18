@@ -166,7 +166,7 @@ check(C.macAccessHint(.notAsked)!.hasPrefix("Click Allow in System Settings: mac
       && C.macAccessHint(.asks) == C.macAccessHint(.denied) && C.macAccessHint(.asks)!.contains("Paste from Other Apps"),
       "the way to allow it: asked once first while macOS has not asked about Sill (it is not listed until then)")
 check(C.macAccessButton == "Allow in System Settings…", "the button")
-check(C.macFootnote == "Text you copy here can be pasted on a connected iPhone or iPad, and text sent from one with Paste becomes this Mac’s. Copies a password manager marks as concealed stay on this Mac.",
+check(C.macFootnote == "Text and images you copy here can be pasted on a connected iPhone or iPad, and copies sent from one with Paste become this Mac’s. Images need an updated Sill on both devices. Copies a password manager marks as concealed stay on this Mac.",
       "Settings › General's footnote: only what a password manager marks stays, and a device's text comes with Paste")
 check(C.macAccessLine(.allowed).hasPrefix("Clipboard: macOS lets Sill read the clipboard again")
       && C.macAccessLine(.asks).hasPrefix("Clipboard: macOS asks before Sill reads the clipboard")
@@ -181,8 +181,8 @@ check(P.fromDevice(data(#"{"text":""}"#)) == .subscribe, "empty text: subscribes
 check(P.fromDevice(data(#"{"stop":true}"#)) == .stop, "stop")
 check(P.fromDevice(data(#"{"stop":true,"text":"abc"}"#)) == .stop, "stop wins over text")
 check(P.fromDevice(data(#"{"stop":false}"#)) == .subscribe, "stop false is no stop")
-check(P.fromDevice(data(#"{"image":"AQID"}"#)) == .subscribe, "an image alone: subscribes, this generation takes none")
-check(P.fromDevice(data(#"{"text":"t","image":"AQID"}"#)) == .set("t"), "text and an image: the text")
+check(P.fromDevice(data(#"{"image":"AQID"}"#)) == .refuse(.undecodable), "invalid image bytes are refused")
+check(P.fromDevice(data(#"{"text":"t","image":"AQID"}"#)) == .refuse(.undecodable), "invalid image is refused rather than sending its caption")
 check(P.fromDevice(Wire.encode(Clipboard(text: atCap))) == .set(atCap), "at the cap: set")
 check(P.fromDevice(Wire.encode(Clipboard(text: atCap + "a"))) == .refuse(.tooLong), "over it: refused, nothing subscribed")
 check(P.fromDevice(data("not json")) == .refuse(.undecodable) && P.fromDevice(data(#"{"text":7}"#)) == .refuse(.undecodable)
@@ -382,7 +382,7 @@ for _ in 0..<5_000 {
             if !hostOn { modelFailures += 1; break }    // a kind 32 to a host that did not say it takes it
             let payload = step.send == .subscribe ? P.subscription : P.stopping
             switch P.fromDevice(payload) {
-            case .subscribe, .set: hostSubscribed = true
+            case .subscribe, .set, .setImage: hostSubscribed = true
             case .stop: hostSubscribed = false
             case .refuse: modelFailures += 1
             }
@@ -427,7 +427,7 @@ for _ in 0..<5_000 {
             let got = P.hostReceives(payload, arrivals: arrivals, now: now)
             arrivals = got.kept
             switch got.ask {
-            case .subscribe, .set: hostSubscribed = true
+            case .subscribe, .set, .setImage: hostSubscribed = true
             case .stop: hostSubscribed = false
             case .refuse(.rate): if step.send == .subscribe { refusedSubscriptions += 1 }
             case .refuse: quickFailures += 1

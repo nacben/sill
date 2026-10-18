@@ -38,7 +38,7 @@ final class HostClipboard {
     /// Share clipboard with devices.
     private(set) var enabled: Bool
     /// The window lists' `clipboard`: the generation while on, nil while off.
-    var advertised: Int? { enabled ? ClipboardPolicy.generation : nil }
+    var advertised: Int? { enabled ? ClipboardPolicy.currentGeneration : nil }
 
     private let server: StreamServer
     /// The pasteboard, on its own queue: `NSPasteboard.general`, or a synthetic host's own.
@@ -52,7 +52,7 @@ final class HostClipboard {
     let testHookLine: String?
 
     /// The subscribers, by connection, and each one's name for the lines.
-    private var subscribers: [ObjectIdentifier: (connection: NWConnection, who: String)] = [:]
+    private var subscribers: [ObjectIdentifier: (connection: NWConnection, who: String, images: Bool)] = [:]
     /// In the order they subscribed, for a stable order of sends.
     private var order: [ObjectIdentifier] = []
     private var look: Task<Void, Never>?
@@ -152,14 +152,20 @@ final class HostClipboard {
         arrivals[id] = got.kept
         switch got.ask {
         case .subscribe:
-            subscribe(connection, who: who)
+            subscribe(connection, who: who, images: ClipboardPolicy.acceptsImages(payload))
         case .set(let text):
-            subscribe(connection, who: who)
+            subscribe(connection, who: who, images: ClipboardPolicy.acceptsImages(payload))
             board.write(text)
             Stats.shared.bump("clip.recv")
             let others = ClipboardPolicy.forward(to: order, from: id).compactMap { subscribers[$0]?.connection }
             if testLog { print("Test clipboard: \(text.utf8.count) bytes from \(who) set on the pasteboard, sent to \(others.count) other device\(others.count == 1 ? "" : "s").") }
             send(payload: ClipboardPolicy.payload(text: text), to: others)
+        case .setImage(let image):
+            subscribe(connection, who: who, images: ClipboardPolicy.acceptsImages(payload))
+            board.write(image: image)
+            Stats.shared.bump("clip.recv")
+            let others = ClipboardPolicy.forward(to: order, from: id).compactMap { subscribers[$0] }.filter(\.images).map(\.connection)
+            send(payload: ClipboardPolicy.payload(image: image), to: others)
         case .stop:
             guard let gone = subscribers.removeValue(forKey: id) else { return }
             order.removeAll { $0 == id }
@@ -179,14 +185,17 @@ final class HostClipboard {
         if subscribers.isEmpty { stopLooking() }
     }
 
-    private func subscribe(_ connection: NWConnection, who: String) {
+    private func subscribe(_ connection: NWConnection, who: String, images: Bool) {
         let id = ObjectIdentifier(connection)
-        guard subscribers[id] == nil else { return }
+        if subscribers[id] != nil {
+            subscribers[id] = (connection, who, images)
+            return
+        }
         if let testBoardName, !saidTestBoard {
             saidTestBoard = true
             print("Test clipboard: a pasteboard of this host's own, \(testBoardName), never this Mac's clipboard.")
         }
-        subscribers[id] = (connection, who)
+        subscribers[id] = (connection, who, images)
         order.append(id)
         print(ClipboardPolicy.Copy.sharesLine(device: who))
         startLooking()
@@ -224,6 +233,9 @@ final class HostClipboard {
         case .send(let payload):
             let to = order.compactMap { subscribers[$0]?.connection }
             if testLog { print("Test clipboard: change \(count) sent to \(to.count) device\(to.count == 1 ? "" : "s") (\(payload.count) bytes of JSON).") }
+            send(payload: payload, to: to)
+        case .sendImage(let payload):
+            let to = order.compactMap { subscribers[$0] }.filter(\.images).map(\.connection)
             send(payload: payload, to: to)
         case .skip(let why):
             if testLog { print("Test clipboard: change \(count) not sent (\(why.rawValue)).") }
@@ -309,8 +321,35 @@ final class HostClipboard {
             let decision = ClipboardPolicy.hostDecides(types: types, changeCount: count, ownChangeCount: ownChangeCount,
                                                        launchID: launchID,
                                                        ownMarker: { self.board.string(forType: own) },
-                                                       text: { self.board.string(forType: .string) })
+                                                       text: { self.board.string(forType: .string) },
+                                                       image: { self.readImage() })
             return Look(access: access, change: (count, decision))
+        }
+
+        /// Read only explicit image representations, never a file URL or another device's board.
+        /// ClipboardPolicy checks concealed/transient/Universal Clipboard markers before calling this.
+        private func readImage() -> Data? {
+            for type in ClipboardImage.sourceTypes {
+                let boardType = NSPasteboard.PasteboardType(type)
+                if board.types?.contains(boardType) == true, let data = board.data(forType: boardType) {
+                    return ClipboardImage.prepare(data)
+                }
+            }
+            return nil
+        }
+
+        func write(image: Data) {
+            queue.async {
+                guard let type = ClipboardImage.type(of: image) else { return }
+                let prepared = self.board.prepareForNewContents(with: .currentHostOnly)
+                let item = NSPasteboardItem()
+                item.setData(image, forType: NSPasteboard.PasteboardType(type))
+                item.setString(self.launchID, forType: NSPasteboard.PasteboardType(ClipboardPolicy.ownType))
+                self.board.writeObjects([item])
+                let count = self.lastAccess.map(ClipboardPolicy.hostLooks) == false ? prepared : self.board.changeCount
+                self.ownChangeCount = count
+                self.seen = count
+            }
         }
 
         /// A device's text, for this Mac only, marked as this launch's, its change count kept. Written

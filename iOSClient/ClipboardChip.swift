@@ -1,5 +1,6 @@
 import SwiftUI
 import StreamProtocol
+import UniformTypeIdentifiers
 
 /// The clipboard's chip over the stream (docs/clipboard-plan.md): "Paste on ‹Mac›", then press ⌘V
 /// there, with the system's Paste button and Dismiss; for a moment after a Paste, its note in the same
@@ -45,7 +46,7 @@ struct ClipboardChip: View {
             .layoutPriority(-1)
             // One element for the words; the Paste button and Dismiss are their own.
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(ClipboardPolicy.Copy.chipSpoken(mac: mac, device: StreamClient.deviceWord))
+            .accessibilityLabel(ClipboardPolicy.Copy.chipSpoken(mac: mac, device: StreamClient.deviceWord, images: ClipboardPolicy.hostTakesImages(client.hostClipboard)))
             .accessibilityAddTraits(.isStaticText)
             ClipboardPasteButton(client: client)
             Button(action: { client.dismissClipboardChip() }) {
@@ -96,14 +97,15 @@ struct ClipboardPasteButton: View {
     @ObservedObject var client: StreamClient
 
     var body: some View {
-        PasteButton(payloadType: String.self) { strings in
+        PasteButton(supportedContentTypes: ClipboardPolicy.hostTakesImages(client.hostClipboard) ? [.image, .plainText] : [.plainText]) { providers in
             // On the main thread whatever queue the system hands it on.
-            DispatchQueue.main.async { client.sendClipboard(strings) }
+            DispatchQueue.main.async { client.pasteClipboard(providers) }
         }
+        .disabled(client.clipboardPreparing)
         .buttonBorderShape(.capsule)
         .labelStyle(.titleAndIcon)
         .tint(Palette.accent)
         .accessibilityHint(ClipboardPolicy.Copy.pasteHint(mac: client.macName.isEmpty ? "the Mac" : client.macName,
-                                                          device: StreamClient.deviceWord))
+                                                          device: StreamClient.deviceWord, images: ClipboardPolicy.hostTakesImages(client.hostClipboard)))
     }
 }

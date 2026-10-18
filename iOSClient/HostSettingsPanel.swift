@@ -503,7 +503,7 @@ struct HostSettingsPanel: View {
                     .padding(.bottom, -6)
                     .accessibilityHidden(true)      // announced as it came
             }
-            Footnote(text: ClipboardPolicy.Copy.footnote(on: clipboardOn, mac: mac, device: device))
+            Footnote(text: ClipboardPolicy.Copy.footnote(on: clipboardOn, mac: mac, device: device, images: ClipboardPolicy.hostTakesImages(client.hostClipboard)))
         }
         Rows {
             Toggle(isOn: $gesturesOn) {

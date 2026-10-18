@@ -85,7 +85,12 @@ extension StreamClient {
     /// after Sill became active gets the chip's look then.
     func hostClipboardChanged(_ value: Int?) {
         let took = ClipboardPolicy.hostTakes(hostClipboard)
-        if hostClipboard != value { hostClipboard = value }
+        if hostClipboard != value {
+            if ClipboardPolicy.hostTakesImages(hostClipboard) != ClipboardPolicy.hostTakesImages(value) {
+                clipboardSubscribed = false
+            }
+            hostClipboard = value
+        }
         updateClipboardSubscription()
         let takes = ClipboardPolicy.hostTakes(value)
         if !takes { hideClipboardChip() }
@@ -101,7 +106,7 @@ extension StreamClient {
         clipboardSubscribed = step.subscribed
         switch step.send {
         case .subscribe:
-            send(.clipboard, payload: ClipboardPolicy.subscription)
+            send(.clipboard, payload: ClipboardPolicy.subscription(hostClipboard: hostClipboard))
             #if DEBUG
             print("clipboard: subscribed")
             #endif
@@ -118,7 +123,11 @@ extension StreamClient {
     /// The Settings group's switch moved.
     func clipboardSwitchChanged() {
         updateClipboardSubscription()
-        if !Self.clipboardOn { hideClipboardChip() }
+        if !Self.clipboardOn {
+            clipboardPasteGeneration += 1
+            clipboardPreparing = false
+            hideClipboardChip()
+        }
     }
 
     /// A move handed the session to its new connection (`finishMove`): the Mac keeps subscriptions per
@@ -130,6 +139,8 @@ extension StreamClient {
 
     /// The session ended: nothing of it is kept but the handled count.
     func resetClipboard() {
+        clipboardPasteGeneration += 1
+        clipboardPreparing = false
         hostClipboard = nil
         clipboardSubscribed = false
         clipboardSent = nil
@@ -148,7 +159,19 @@ extension StreamClient {
 
     /// A kind 32 from the Mac.
     func receiveClipboard(_ payload: Data) {
+        guard payload.count <= ClipboardPolicy.maxPayload else { return }
         let board = UIPasteboard.general
+        if let image = ClipboardPolicy.deviceImage(payload, switchOn: Self.clipboardOn, hostClipboard: hostClipboard,
+                                                    lastSent: clipboardSent, changeCount: board.changeCount),
+           let type = ClipboardImage.type(of: image) {
+            board.setItems([[type: image]], options: [.localOnly: true,
+                .expirationDate: Date().addingTimeInterval(ClipboardPolicy.deviceExpiry)])
+            clipboardHandled = board.changeCount
+            hideClipboardChip()
+            return
+        }
+        // Never fall back to a caption/file name when an invalid image was present.
+        if Wire.decode(Clipboard.self, from: payload)?.image != nil { return }
         guard let text = ClipboardPolicy.deviceWrites(payload, switchOn: Self.clipboardOn, hostClipboard: hostClipboard,
                                                       lastSent: clipboardSent, changeCount: board.changeCount) else { return }
         board.setItems([[UTType.utf8PlainText.identifier: text]],
@@ -186,7 +209,7 @@ extension StreamClient {
         // Not while a Paste waits for its receipt: the chip comes back if it never comes.
         let waiting = clipboardReceipt.map { !$0.late } ?? false
         let offer = !waiting && ClipboardPolicy.offersChip(connected: connected, hostClipboard: hostClipboard, switchOn: Self.clipboardOn,
-                                                           hasStrings: board.hasStrings, changeCount: count, handled: clipboardHandled)
+                                                           hasStrings: board.hasStrings, hasImages: board.hasImages, changeCount: count, handled: clipboardHandled)
         #if DEBUG
         print("clipboard: \(why): change \(count), handled \(clipboardHandled.map(String.init) ?? "none")"
               + (waiting ? ", a Paste waiting for its receipt" : "") + ": \(offer ? "the chip" : "no chip")")
@@ -269,29 +292,94 @@ extension StreamClient {
         let mac = macName.isEmpty ? "the Mac" : macName
         switch ClipboardPolicy.deviceSends(strings, connected: connected, hostClipboard: hostClipboard, switchOn: Self.clipboardOn) {
         case .send(let payload):
-            send(.clipboard, payload: payload)
-            // Its receipt: a ping after it through the same door, whose pong says the Mac has read it.
-            // Until then nothing says it was sent, and the copy is not dealt with.
-            let nonce = Data((0..<ClipboardPolicy.receiptLength).map { _ in UInt8.random(in: .min ... .max) })
-            send(.ping, payload: nonce)
-            let count = UIPasteboard.general.changeCount
-            if let text = strings.first(where: { !$0.isEmpty }) { clipboardSent = ClipboardPolicy.Sent(text: text, changeCount: count) }
-            clipboardReceipt = ClipboardReceipt(nonce: nonce, changeCount: count)
-            hideClipboardChip()
-            clipboardReceiptExpiry?.cancel()
-            let wait = ClipboardPolicy.receiptWait(worstRttMs: lastRttMaxMs)
-            let work = DispatchWorkItem { [weak self] in self?.clipboardReceiptLate() }
-            clipboardReceiptExpiry = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: work)
-            #if DEBUG
-            print("clipboard: sent \(payload.count) bytes of JSON to the Mac (change \(count)), its receipt awaited for \(wait) s")
-            #endif
+            if let text = strings.first(where: { !$0.isEmpty }) {
+                sendClipboardPayload(payload, sent: ClipboardPolicy.Sent(text: text, changeCount: UIPasteboard.general.changeCount))
+            }
         case .tooLong:
             showClipboardNote(ClipboardPolicy.Copy.tooLong(mac: mac), spoken: ClipboardPolicy.Copy.tooLong(mac: mac), warning: true)
             if UIDevice.current.userInterfaceIdiom == .phone { UINotificationFeedbackGenerator().notificationOccurred(.warning) }
         case .nothing:
             break
         }
+    }
+
+    private func sendClipboardPayload(_ payload: Data, sent: ClipboardPolicy.Sent) {
+        send(.clipboard, payload: payload)
+        // Its receipt: a ping after it through the same door, whose pong says the Mac has read it.
+        // Until then nothing says it was sent, and the copy is not dealt with.
+        let nonce = Data((0..<ClipboardPolicy.receiptLength).map { _ in UInt8.random(in: .min ... .max) })
+        send(.ping, payload: nonce)
+        let count = sent.changeCount
+        clipboardSent = sent
+        clipboardReceipt = ClipboardReceipt(nonce: nonce, changeCount: count)
+        hideClipboardChip()
+        clipboardReceiptExpiry?.cancel()
+        let wait = ClipboardPolicy.receiptWait(worstRttMs: lastRttMaxMs)
+        let work = DispatchWorkItem { [weak self] in self?.clipboardReceiptLate() }
+        clipboardReceiptExpiry = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: work)
+        #if DEBUG
+        print("clipboard: sent \(payload.count) bytes of JSON to the Mac (change \(count)), its receipt awaited for \(wait) s")
+        #endif
+    }
+
+    /// Only item providers supplied by the system Paste button, following the person's tap.
+    /// Conversion happens off main; a stopped or replaced session invalidates pending work.
+    func pasteClipboard(_ providers: [NSItemProvider]) {
+        guard connected, Self.clipboardOn, ClipboardPolicy.hostTakes(hostClipboard), !clipboardPreparing else { return }
+        clipboardPasteGeneration += 1
+        let generation = clipboardPasteGeneration
+        let count = UIPasteboard.general.changeCount
+        let images = ClipboardPolicy.hostTakesImages(hostClipboard)
+        if images, let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.image.identifier) }),
+           let type = provider.registeredTypeIdentifiers.first(where: { UTType($0)?.conforms(to: .image) == true }) {
+            clipboardPreparing = true
+            clipboardPasteTimeout(generation)
+            provider.loadDataRepresentation(forTypeIdentifier: type) { [weak self] data, _ in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let image = data.flatMap(ClipboardImage.prepare)
+                    DispatchQueue.main.async {
+                        guard let self, self.clipboardPasteGeneration == generation else { return }
+                        self.clipboardPreparing = false
+                        guard self.connected, Self.clipboardOn, ClipboardPolicy.hostTakesImages(self.hostClipboard) else { return }
+                        guard UIPasteboard.general.changeCount == count else {
+                            self.clipboardImageFailed("Clipboard changed. Tap Paste again.")
+                            return
+                        }
+                        guard let image, let payload = ClipboardPolicy.payload(image: image, accepts: ClipboardPolicy.imageGeneration) else {
+                            self.clipboardImageFailed("Couldn’t send this image. Try a smaller image or a screenshot.")
+                            return
+                        }
+                        self.sendClipboardPayload(payload, sent: ClipboardPolicy.Sent(image: image, changeCount: count))
+                    }
+                }
+            }
+        } else if let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) {
+            clipboardPreparing = true
+            clipboardPasteTimeout(generation)
+            _ = provider.loadObject(ofClass: NSString.self) { [weak self] value, _ in
+                DispatchQueue.main.async {
+                    guard let self, self.clipboardPasteGeneration == generation else { return }
+                    self.clipboardPreparing = false
+                    guard UIPasteboard.general.changeCount == count else { return }
+                    if let text = value as? String { self.sendClipboard([text]) }
+                }
+            }
+        }
+    }
+
+    /// A broken item provider must not leave Paste disabled for the rest of the session.
+    private func clipboardPasteTimeout(_ generation: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+            guard let self, self.clipboardPreparing, self.clipboardPasteGeneration == generation else { return }
+            self.clipboardPasteGeneration += 1
+            self.clipboardPreparing = false
+            self.clipboardImageFailed("Couldn’t read this copy. Tap Paste to try again.")
+        }
+    }
+
+    private func clipboardImageFailed(_ message: String) {
+        showClipboardNote(message, spoken: message, warning: true)
     }
 
     /// A receipt's pong (StreamClient.handle): the Mac has read the text. "Sent…", and the copy is dealt
