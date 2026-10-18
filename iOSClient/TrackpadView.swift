@@ -38,7 +38,7 @@ struct Trackpad: View {
                          verticalSpan: verticalSpan, sendGesture: sendGesture)
             VStack {
                 Spacer(minLength: 0)
-                Text("Drag to move the pointer. Tap to click, two fingers to scroll.")
+                Text("Drag to move. Tap to click. Tap with two fingers to right-click; drag with two fingers to scroll.")
                     .font(.system(size: 13))
                     .foregroundStyle(Palette.muted)
                     .multilineTextAlignment(.center)
@@ -235,6 +235,13 @@ final class TrackpadSurface: UIView, UIGestureRecognizerDelegate {
         twoFingerTap.numberOfTouchesRequired = 2
         addGestureRecognizer(twoFingerTap)
 
+        // A physical mouse/trackpad secondary click is one indirect-pointer touch, not a
+        // two-finger touch gesture. UIKit's ordinary tap recognizer requires the primary button.
+        let secondaryClick = UITapGestureRecognizer(target: self, action: #selector(handleSecondaryClick))
+        secondaryClick.buttonMaskRequired = .secondary
+        secondaryClick.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
+        addGestureRecognizer(secondaryClick)
+
         // Press and hold, then drag: the left button goes down and stays down, so a window or a
         // selection can be dragged from the pad. It has to run alongside the tracker, which is what
         // actually moves the pointer while the button is held.
@@ -262,6 +269,13 @@ final class TrackpadSurface: UIView, UIGestureRecognizerDelegate {
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+
+    /// The hardware secondary button belongs to its dedicated tap recognizer, which has no
+    /// delegate. Do not let the movement tracker or press-and-hold recognizer turn it into a
+    /// left-button drag. Direct finger gestures and primary-button input keep their usual path.
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive event: UIEvent) -> Bool {
+        !event.buttonMask.contains(.secondary)
+    }
 
     // MARK: - Pointer
 
@@ -475,6 +489,12 @@ final class TrackpadSurface: UIView, UIGestureRecognizerDelegate {
 
     /// Two fingers is the right button, the way a Mac trackpad's secondary click works.
     @objc private func handleTwoFingerTap() {
+        guard !strokes.silent else { return }
+        click(down: .rightDown, up: .rightUp)
+    }
+
+    /// Hardware secondary clicks over the pad use the same Mac cursor as a two-finger tap.
+    @objc private func handleSecondaryClick() {
         guard !strokes.silent else { return }
         click(down: .rightDown, up: .rightUp)
     }

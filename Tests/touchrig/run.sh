@@ -59,7 +59,7 @@ cp "$here/Stubs.swift" "$here/main.swift" "$here/TouchSynth.h" "$here/TouchSynth
 
 target=arm64-apple-ios17.0-simulator
 xcrun -sdk iphonesimulator clang -target $target -fobjc-arc -Wall -c TouchSynth.m -o TouchSynth.o
-xcrun -sdk iphonesimulator swiftc -target $target -swift-version 5 -module-name TouchRig -Onone ${flags[@]+"${flags[@]}"} \
+xcrun -sdk iphonesimulator swiftc -target $target -swift-version 5 -module-name TouchRig -Onone -whole-module-optimization ${flags[@]+"${flags[@]}"} \
     -import-objc-header Bridging.h Stubs.swift Keys.swift Input.swift $(ls PointerPresence.swift TrackpadGestures.swift KeyChords.swift HardwareKeyboardPolicy.swift 2>/dev/null) \
     TrackpadView.swift InputOverlay.swift main.swift TouchSynth.o -o "$work/TouchRig.app/TouchRig"
 cat > "$work/TouchRig.app/Info.plist" <<'PLIST'

@@ -379,6 +379,16 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     func run(_ root: Root, _ w: UIWindow) {
+        if ProcessInfo.processInfo.environment["RIG_POINTER"] == "1" {
+            root.overlay.send = { print("POINTER overlay \(describe($0))") }
+            root.trackpad.send = { print("POINTER trackpad \(describe($0))") }
+            for (name, v) in [("overlay", root.overlay as UIView), ("trackpad", root.trackpad as UIView)] {
+                let c = v.convert(CGPoint(x: v.bounds.midX, y: v.bounds.midY), to: w)
+                print("RIG POINTER READY \(name) \(Int(c.x)),\(Int(c.y))")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 90) { print("RIG done"); exit(0) }
+            return
+        }
         print("RIG selfCheck: \(TouchSynth.selfCheck())")
         #if GESTURES
         print("RIG surfaces: with the gestures, switch \(ProcessInfo.processInfo.environment["RIG_SWITCH"] == "off" ? "off" : "on")")
@@ -400,4 +410,5 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 }
 
+setbuf(stdout, nil)
 UIApplicationMain(CommandLine.argc, CommandLine.unsafeArgv, nil, NSStringFromClass(AppDelegate.self))

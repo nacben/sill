@@ -13,7 +13,7 @@
 //   keyrig keys <spec> [settle] [hold]     spec: USAGE[:down|:up],… in hex (HID page 7): a bare USAGE is a
 //                                          press (down, 60 ms, up); steps 250 ms apart. 29 is Esc, e3 ⌘.
 //   keyrig point <script> [settle] [hold]  script: steps separated by ; or |: move DX,DY (a relative
-//                                          pointer move), wheel DY (one scroll event, lines), phase
+//                                          pointer move), buttons MASK (1 primary, 2 secondary, 0 release), wheel DY (one scroll event, lines), phase
 //                                          began|changed|ended DX,DY (a scroll event with that phase),
 //                                          momentum BITS DY (a scroll event marked as momentum, the bits
 //                                          in hex: 2 start, 1 continue, 4 end), wait S
@@ -141,6 +141,7 @@ static int point(NSString *script, double settle, double hold) {
                              @"HIDVirtualDevice": @YES };
     id service = startService(delegate, settle);
     int failures = 0;
+    uint32_t buttons = 0;
     NSCharacterSet *separators = [NSCharacterSet characterSetWithCharactersInString:@";|"];
     for (NSString *raw in [script componentsSeparatedByCharactersInSet:separators]) {
         NSString *step = [raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
@@ -150,7 +151,11 @@ static int point(NSString *script, double settle, double hold) {
         double a = numbers.count > 0 ? [numbers[0] doubleValue] : 0, b = numbers.count > 1 ? [numbers[1] doubleValue] : 0;
         IOHIDEventRef event = NULL;
         if ([words[0] isEqualToString:@"wait"]) { spin(a); continue; }
-        if ([words[0] isEqualToString:@"move"] && numbers.count == 2) event = move(kCFAllocatorDefault, mach_absolute_time(), a, b, 0, 0, 0);
+        if ([words[0] isEqualToString:@"move"] && numbers.count == 2) event = move(kCFAllocatorDefault, mach_absolute_time(), a, b, 0, buttons, 0);
+        else if ([words[0] isEqualToString:@"buttons"] && numbers.count == 1) {
+            buttons = (uint32_t)a;
+            event = move(kCFAllocatorDefault, mach_absolute_time(), 0, 0, 0, buttons, 0);
+        }
         else if ([words[0] isEqualToString:@"wheel"] && numbers.count == 1) event = scroll(kCFAllocatorDefault, mach_absolute_time(), 0, a, 0, 0);
         else if ([words[0] isEqualToString:@"phase"] && words.count == 3 && numbers.count == 2) {
             NSDictionary *bits = @{ @"began": @1, @"changed": @2, @"ended": @4 };
@@ -171,12 +176,13 @@ static int point(NSString *script, double settle, double hold) {
         if (!ok) failures++;
         spin(0.016);
     }
+    if (buttons) dispatchEvent(service, move(kCFAllocatorDefault, mach_absolute_time(), 0, 0, 0, 0, 0));
     stopService(service, hold);
     return failures ? 1 : 0;
 }
 
 static int usage(void) {
-    out(@"usage: keyrig keys <USAGE[:down|:up],…> [settle] [hold] | point <move DX,DY|wheel DY|phase P DX,DY|momentum BITS DY|wait S;…> [settle] [hold]");
+    out(@"usage: keyrig keys <USAGE[:down|:up],…> [settle] [hold] | point <move DX,DY|buttons MASK|wheel DY|phase P DX,DY|momentum BITS DY|wait S;…> [settle] [hold]");
     return 2;
 }
 
